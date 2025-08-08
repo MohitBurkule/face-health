@@ -6,6 +6,9 @@ import { Separator } from "@/components/ui/separator";
 import { estimateFacialAdiposity } from "@/lib/facialFat";
 import { computeHeartRate } from "@/lib/ppg";
 import { getFaceMetrics } from "@/lib/faceMetrics";
+import { smoothChaikin } from "@/lib/smoothing";
+import { estimateRespirationRate, estimateHRV } from "@/lib/ppgExtras";
+import { createInsightsTracker } from "@/lib/faceInsights";
 
 // MediaPipe Tasks Vision types come from the package at runtime; we keep TS light here
 // to avoid depending on their types directly.
@@ -30,11 +33,18 @@ export default function FaceAnalyzer() {
   const [fatCategory, setFatCategory] = useState<"low" | "medium" | "high">("low");
   const [signalQuality, setSignalQuality] = useState(0);
 
+  const [blinkRate, setBlinkRate] = useState<number | null>(null);
+  const [perclos, setPerclos] = useState(0);
+  const [yawnProb, setYawnProb] = useState(0);
+  const [respRate, setRespRate] = useState<number | null>(null);
+  const [rmssd, setRmssd] = useState<number | null>(null);
+
   const samplesRef = useRef<Sample[]>([]);
   const landmarkerRef = useRef<any>(null);
   const rafRef = useRef<number | null>(null);
   const hiddenCanvas = useMemo(() => document.createElement("canvas"), []);
   const hiddenCtx = useMemo(() => hiddenCanvas.getContext("2d", { willReadFrequently: true }), [hiddenCanvas]);
+  const insightsRef = useRef(createInsightsTracker());
 
   // Signature interaction: reactive gradient position
   useEffect(() => {
@@ -147,12 +157,18 @@ export default function FaceAnalyzer() {
 
       // Compute contours and metrics
       const m = getFaceMetrics(points as any);
+      // Update insights tracker (blinks, PERCLOS, yawn)
+      const snap = insightsRef.current.update(m, ts);
+      setBlinkRate(snap.blinkRatePerMin ?? null);
+      setPerclos(snap.perclos);
+      setYawnProb(snap.yawnProbability);
 
       // Draw jawline path
       if (m.jawline.path.length) {
+        const smoothed = smoothChaikin(m.jawline.path as any, 2);
         ctx.strokeStyle = "hsl(var(--muted-foreground))";
         ctx.beginPath();
-        m.jawline.path.forEach((p, idx) => {
+        smoothed.forEach((p, idx) => {
           const px = p.x * canvas.width;
           const py = p.y * canvas.height;
           if (idx === 0) ctx.moveTo(px, py);
@@ -189,11 +205,28 @@ export default function FaceAnalyzer() {
           const eyeDist = Math.hypot(rx - lx, ry - ly) || 1;
           const desiredEyeDist = targetW * 0.45;
           const scale = desiredEyeDist / eyeDist;
-          const roll = m.head.roll;
+
+          // Use MediaPipe facial transformation matrix if available to refine yaw/roll
+          let yawShear = -m.head.yaw * 0.5; // fallback shear from heuristic yaw
+          let rollAdj = -m.head.roll;
+          const mats = (res as any)?.facialTransformationMatrixes;
+          try {
+            const arr = mats?.[0]?.data ?? mats?.[0];
+            if (arr && arr.length >= 16) {
+              const r00 = arr[0], r01 = arr[1], r02 = arr[2];
+              const r10 = arr[4], r11 = arr[5], r12 = arr[6];
+              const r20 = arr[8], r21 = arr[9], r22 = arr[10];
+              const yaw = Math.atan2(-r20, Math.hypot(r00, r10));
+              const roll = Math.atan2(r10, r00);
+              yawShear = Math.max(-0.6, Math.min(0.6, -Math.tan(yaw) * 0.5));
+              rollAdj = -roll;
+            }
+          } catch {}
 
           fctx.save();
           fctx.translate(targetW / 2, targetH / 2);
-          fctx.rotate(-roll);
+          fctx.rotate(rollAdj);
+          fctx.transform(1, 0, yawShear, 1, 0, 0);
           fctx.scale(scale, scale);
           // draw video centered on eye center
           fctx.drawImage(video, -cx, -cy, canvas.width, canvas.height);
@@ -260,6 +293,20 @@ export default function FaceAnalyzer() {
           const variance = gVals.reduce((a, b) => a + (b - mu) * (b - mu), 0) / gVals.length;
           const sq = Math.max(0, Math.min(1, variance / 100));
           setSignalQuality(sq);
+
+          // Respiration (every ~2s)
+          if (!lastRespCompute || ts - lastRespCompute > 2000) {
+            const rr = estimateRespirationRate(samplesRef.current);
+            setRespRate(rr.bpm ? Math.round(rr.bpm) : null);
+            lastRespCompute = ts;
+          }
+
+          // HRV (every ~5s)
+          if (!lastHRVCompute || ts - lastHRVCompute > 5000) {
+            const hrv = estimateHRV(samplesRef.current);
+            setRmssd(hrv.rmssd ?? null);
+            lastHRVCompute = ts;
+          }
         }
       }
 
@@ -271,6 +318,8 @@ export default function FaceAnalyzer() {
   }
 
   let lastHRCompute = 0;
+  let lastRespCompute = 0;
+  let lastHRVCompute = 0;
 
   const confidenceBadge = hrConfidence > 0.66 ? "High" : hrConfidence > 0.33 ? "Medium" : "Low";
   const confVariant = hrConfidence > 0.66 ? "default" : hrConfidence > 0.33 ? "secondary" : "outline";
@@ -307,7 +356,7 @@ export default function FaceAnalyzer() {
 
         <Separator className="my-4" />
 
-        <div className="grid md:grid-cols-2 gap-4">
+        <div className="grid md:grid-cols-3 gap-4">
           <Card className="p-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">Heart rate</h3>
@@ -332,6 +381,34 @@ export default function FaceAnalyzer() {
                 />
               </div>
               <p className="text-xs text-muted-foreground mt-2">Heuristic index based on face geometry. Lighting, camera angle, and expression affect results.</p>
+            </div>
+          </Card>
+
+          <Card className="p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold">Eye & Respiration</h3>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+              <div>
+                <div className="text-muted-foreground">Blink rate</div>
+                <div className="font-semibold">{blinkRate != null ? `${blinkRate.toFixed(0)} /min` : "—"}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">PERCLOS</div>
+                <div className="font-semibold">{(perclos * 100).toFixed(0)}%</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">Yawn</div>
+                <div className="font-semibold">{(yawnProb * 100).toFixed(0)}%</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">Resp. rate</div>
+                <div className="font-semibold">{respRate != null ? `${respRate} brpm` : "—"}</div>
+              </div>
+              <div className="col-span-2">
+                <div className="text-muted-foreground">HRV (RMSSD)</div>
+                <div className="font-semibold">{rmssd != null ? `${rmssd.toFixed(0)} ms` : "—"}</div>
+              </div>
             </div>
           </Card>
         </div>
