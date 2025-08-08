@@ -110,14 +110,29 @@ function estimateHeadPose(box: FaceBox, leftEye: Point2D, rightEye: Point2D): He
 }
 
 function lowerJawPath(pts: Point3D[], box: FaceBox): Point2D[] {
-  // Take lower third points and compute a simple x-sorted contour
-  const lower = pts.filter(p => p.y >= box.minY + box.height * 0.66);
-  const sorted = lower.sort((a,b) => a.x - b.x);
-  // Thin by taking every Nth to avoid heavy drawing
-  const step = Math.max(1, Math.floor(sorted.length / 40));
-  const path: Point2D[] = [];
-  for (let i = 0; i < sorted.length; i += step) path.push({ x: sorted[i].x, y: sorted[i].y });
-  return path;
+  // Prefer MediaPipe face oval indices when available
+  const hasMesh = pts.length >= 400;
+  if (hasMesh) {
+    // Face oval indices (MediaPipe 468 mesh)
+    const OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+    const ovalPts = OVAL.map(i => pts[i]).filter(Boolean) as Point3D[];
+    if (ovalPts.length) {
+      const ys = ovalPts.map(p => p.y).sort((a,b) => a - b);
+      const thr = percentile(ys, 0.55); // keep the lowermost half of oval
+      const jaw = OVAL
+        .map(i => pts[i])
+        .filter((p): p is Point3D => !!p && p.y >= thr)
+        .map(p => ({ x: p.x, y: p.y }));
+      return jaw;
+    }
+  }
+  // Fallback: take the globally lowest points and sort by x
+  const candidates = pts
+    .slice()
+    .sort((a,b) => b.y - a.y) // lowest (largest y) first
+    .slice(0, Math.max(12, Math.floor(pts.length * 0.06))); // ~lowest 6%
+  const sorted = candidates.sort((a,b) => a.x - b.x);
+  return sorted.map(p => ({ x: p.x, y: p.y }));
 }
 
 export function getFaceMetrics(landmarks: Point3D[]): FaceMetricsResult {

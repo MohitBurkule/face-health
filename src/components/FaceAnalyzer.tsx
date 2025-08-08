@@ -26,6 +26,7 @@ export default function FaceAnalyzer() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const frontRef = useRef<HTMLCanvasElement | null>(null);
+  const hrRef = useRef<HTMLCanvasElement | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [bpm, setBpm] = useState<number | null>(null);
@@ -41,6 +42,15 @@ export default function FaceAnalyzer() {
   const [rmssd, setRmssd] = useState<number | null>(null);
 
   const samplesRef = useRef<Sample[]>([]);
+  const smoothCtrlRef = useRef<{lx:number;ly:number;rx:number;ry:number;mx:number;my:number}|null>(null);
+  const smoothBoxRef = useRef<{x:number;y:number;w:number;h:number}|null>(null);
+  const prevPointsRef = useRef<{x:number;y:number}[]|null>(null);
+  const prevAnchorsRef = useRef<{L:{x:number;y:number};R:{x:number;y:number};M:{x:number;y:number}}|null>(null);
+  const [motionSeries, setMotionSeries] = useState<{t:number;v:number}[]>([]);
+  const [motionNow, setMotionNow] = useState(0);
+  const [jawRecording, setJawRecording] = useState(false);
+  const jawDatasetRef = useRef<any[]>([]);
+  const lastJawSaveRef = useRef(0);
   const landmarkerRef = useRef<any>(null);
   const rafRef = useRef<number | null>(null);
   const hiddenCanvas = useMemo(() => document.createElement("canvas"), []);
@@ -143,9 +153,9 @@ export default function FaceAnalyzer() {
       ctx.strokeStyle = "hsl(var(--ring))";
       ctx.fillStyle = "hsl(var(--primary) / 0.2)" as any;
 
-      // Outline via bounding box for performance
+      // Bounds (used for ROI and stabilization)
       const box = getBounds(points, canvas.width, canvas.height);
-      ctx.strokeRect(box.x, box.y, box.w, box.h);
+      // no visual face bounding box
 
       // Draw all landmark points
       ctx.fillStyle = "hsl(var(--primary))" as any;
@@ -187,6 +197,40 @@ export default function FaceAnalyzer() {
         ctx.fill();
       }
 
+      // Facial motion metric (relative landmark movement)
+      {
+        const currPx = points.map((p) => ({ x: p.x * canvas.width, y: p.y * canvas.height }));
+        const anchorsCurr = {
+          L: { x: m.eyes.left.center.x * canvas.width, y: m.eyes.left.center.y * canvas.height },
+          R: { x: m.eyes.right.center.x * canvas.width, y: m.eyes.right.center.y * canvas.height },
+          M: { x: m.mouth.center.x * canvas.width, y: m.mouth.center.y * canvas.height },
+        };
+        const prevPts = prevPointsRef.current;
+        const prevAnch = prevAnchorsRef.current;
+        if (prevPts && prevAnch && prevPts.length === currPx.length) {
+          const Tm = estimateSimilarity2D([prevAnch.L, prevAnch.R, prevAnch.M], [anchorsCurr.L, anchorsCurr.R, anchorsCurr.M]);
+          const apply = (x: number, y: number) => ({
+            x: Tm[0] * x + Tm[2] * y + Tm[4],
+            y: Tm[1] * x + Tm[3] * y + Tm[5],
+          });
+          let sum = 0;
+          for (let i = 0; i < currPx.length; i++) {
+            const p0 = apply(prevPts[i].x, prevPts[i].y);
+            const dx = currPx[i].x - p0.x;
+            const dy = currPx[i].y - p0.y;
+            sum += dx * dx + dy * dy;
+          }
+          const rms = Math.sqrt(sum / currPx.length) / Math.max(1, box.h);
+          setMotionNow(rms);
+          setMotionSeries((s) => {
+            const ns = [...s, { t: ts, v: rms }];
+            while (ns.length > 300) ns.shift();
+            return ns;
+          });
+        }
+        prevPointsRef.current = currPx;
+        prevAnchorsRef.current = anchorsCurr;
+      }
       // Frontalized view (top-right canvas)
       const front = frontRef.current;
       if (front) {
@@ -198,13 +242,25 @@ export default function FaceAnalyzer() {
           }
           fctx.clearRect(0, 0, front.width, front.height);
 
-          // Source control points (pixels)
-          const lx = m.eyes.left.center.x * canvas.width;
-          const ly = m.eyes.left.center.y * canvas.height;
-          const rx = m.eyes.right.center.x * canvas.width;
-          const ry = m.eyes.right.center.y * canvas.height;
-          const mx = m.mouth.center.x * canvas.width;
-          const my = m.mouth.center.y * canvas.height;
+          // Source control points (pixels) with light smoothing for stability
+          let lx = m.eyes.left.center.x * canvas.width;
+          let ly = m.eyes.left.center.y * canvas.height;
+          let rx = m.eyes.right.center.x * canvas.width;
+          let ry = m.eyes.right.center.y * canvas.height;
+          let mx = m.mouth.center.x * canvas.width;
+          let my = m.mouth.center.y * canvas.height;
+
+          const prevCtrl = smoothCtrlRef.current;
+          const alpha = 0.8;
+          if (prevCtrl) {
+            lx = alpha * prevCtrl.lx + (1 - alpha) * lx;
+            ly = alpha * prevCtrl.ly + (1 - alpha) * ly;
+            rx = alpha * prevCtrl.rx + (1 - alpha) * rx;
+            ry = alpha * prevCtrl.ry + (1 - alpha) * ry;
+            mx = alpha * prevCtrl.mx + (1 - alpha) * mx;
+            my = alpha * prevCtrl.my + (1 - alpha) * my;
+          }
+          smoothCtrlRef.current = { lx, ly, rx, ry, mx, my };
 
           // Canonical destination points
           const dst = [
@@ -227,34 +283,55 @@ export default function FaceAnalyzer() {
         }
       }
 
-      // Heart-rate ROI: forehead band (top 15% of face box)
+      // Heart-rate ROI: forehead band (top 15% of face box) with smoothing
       const roi = {
         x: Math.round(box.x + box.w * 0.3),
         y: Math.round(box.y + box.h * 0.08),
         w: Math.round(box.w * 0.4),
         h: Math.round(box.h * 0.12),
       };
+      let sroi = roi;
+      const pb = smoothBoxRef.current;
+      const aR = 0.85;
+      if (pb) {
+        sroi = {
+          x: Math.round(aR * pb.x + (1 - aR) * roi.x),
+          y: Math.round(aR * pb.y + (1 - aR) * roi.y),
+          w: Math.round(aR * pb.w + (1 - aR) * roi.w),
+          h: Math.round(aR * pb.h + (1 - aR) * roi.h),
+        };
+      }
+      smoothBoxRef.current = sroi;
 
-      // visualize ROI
-      ctx.strokeStyle = "hsl(var(--accent))";
-      ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+      // ROI visual disabled
 
       // Sample mean green from ROI
       if (hiddenCtx) {
-        hiddenCanvas.width = roi.w;
-        hiddenCanvas.height = roi.h;
+        hiddenCanvas.width = sroi.w;
+        hiddenCanvas.height = sroi.h;
         hiddenCtx.drawImage(
           video,
-          roi.x,
-          roi.y,
-          roi.w,
-          roi.h,
+          sroi.x,
+          sroi.y,
+          sroi.w,
+          sroi.h,
           0,
           0,
-          roi.w,
-          roi.h
+          sroi.w,
+          sroi.h
         );
-        const img = hiddenCtx.getImageData(0, 0, roi.w, roi.h);
+        // Show ROI preview below frontalized crop
+        const hrCanvas = hrRef.current;
+        if (hrCanvas) {
+          const hctx = hrCanvas.getContext("2d");
+          const targetW = 160, targetH = 64;
+          if (hrCanvas.width !== targetW || hrCanvas.height !== targetH) {
+            hrCanvas.width = targetW; hrCanvas.height = targetH;
+          }
+          hctx?.clearRect(0, 0, hrCanvas.width, hrCanvas.height);
+          hctx?.drawImage(video, sroi.x, sroi.y, sroi.w, sroi.h, 0, 0, hrCanvas.width, hrCanvas.height);
+        }
+        const img = hiddenCtx.getImageData(0, 0, sroi.w, sroi.h);
         const data = img.data;
         let sumG = 0;
         const step = 4 * 4; // stride to reduce work
@@ -299,6 +376,14 @@ export default function FaceAnalyzer() {
         }
       }
 
+      // Optional: record jaw-opening training samples
+      if (jawRecording) {
+        if (!lastJawSaveRef.current || ts - lastJawSaveRef.current > 200) {
+          jawDatasetRef.current.push({ t: ts, mar: m.mouth.openRatio, yaw: m.head.yaw, pitch: m.head.pitch });
+          lastJawSaveRef.current = ts;
+        }
+      }
+
       // Facial fat estimate (lightweight heuristics)
       const adip = estimateFacialAdiposity(points);
       setFullness(adip.fullnessIndex);
@@ -329,6 +414,11 @@ export default function FaceAnalyzer() {
             className="absolute top-3 right-3 w-40 h-40 rounded-md bg-background/70 backdrop-blur-sm ring-1 ring-border shadow-sm"
             aria-label="Frontalized face preview"
           />
+          <canvas
+            ref={hrRef}
+            className="absolute top-44 right-3 w-40 h-20 rounded-md bg-background/70 backdrop-blur-sm ring-1 ring-border shadow-sm"
+            aria-label="Heart-rate ROI preview"
+          />
           {!streaming && (
             <div className="absolute inset-0 grid place-items-center bg-background/80">
               <p className="text-sm text-muted-foreground">{initializing ? "Initializing camera & model…" : "Camera unavailable"}</p>
@@ -340,7 +430,11 @@ export default function FaceAnalyzer() {
           <Button variant="default" onClick={() => (streaming ? stopLoop() : startLoop())}>
             {rafRef.current ? "Pause" : "Resume"}
           </Button>
+          <Button variant={jawRecording ? "destructive" : "secondary"} onClick={() => setJawRecording((v) => !v)}>
+            {jawRecording ? "Stop Jaw Recording" : "Record Jaw Opening"}
+          </Button>
           <Badge variant="secondary">Signal quality: {(signalQuality * 100).toFixed(0)}%</Badge>
+          <Badge variant="outline">Clips: {jawDatasetRef.current.length}</Badge>
         </div>
 
         <Separator className="my-4" />
@@ -354,7 +448,7 @@ export default function FaceAnalyzer() {
             <div className="mt-2 text-4xl font-bold">
               {bpm ? `${bpm} BPM` : "—"}
             </div>
-            <p className="text-xs text-muted-foreground mt-2">Stand still with good lighting. Keep your forehead inside the highlighted box for 15–30 seconds.</p>
+            <p className="text-xs text-muted-foreground mt-2">Hold steady with good lighting. A stable forehead ROI is auto-tracked; wait ~15–30 seconds.</p>
           </Card>
 
           <Card className="p-4">
@@ -401,8 +495,37 @@ export default function FaceAnalyzer() {
             </div>
           </Card>
         </div>
+        <div className="mt-4">
+          <Card className="p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold">Facial motion over time</h3>
+              <Badge variant="secondary">Now: {(motionNow * 100).toFixed(1)}</Badge>
+            </div>
+            <div className="mt-2 text-muted-foreground text-xs">Relative landmark movement (rigid head motion removed).</div>
+            <div className="mt-2">
+              <Sparkline data={motionSeries.map((d) => d.v)} />
+            </div>
+          </Card>
+        </div>
       </Card>
     </div>
+  );
+}
+
+function Sparkline({ data, width = 600, height = 80 }: { data: number[]; width?: number; height?: number }) {
+  const n = data.length || 1;
+  const max = Math.max(1e-6, ...data);
+  const step = width / Math.max(1, n - 1);
+  let d = "";
+  data.forEach((v, i) => {
+    const x = i * step;
+    const y = height - (v / max) * height;
+    d += `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)} `;
+  });
+  return (
+    <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+      <path d={d} fill="none" stroke="hsl(var(--primary))" strokeWidth="2" />
+    </svg>
   );
 }
 
