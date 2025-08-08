@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { estimateFacialAdiposity } from "@/lib/facialFat";
 import { computeHeartRate } from "@/lib/ppg";
+import { getFaceMetrics } from "@/lib/faceMetrics";
 
 // MediaPipe Tasks Vision types come from the package at runtime; we keep TS light here
 // to avoid depending on their types directly.
@@ -20,6 +21,7 @@ interface Sample { t: number; g: number }
 export default function FaceAnalyzer() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
+  const frontRef = useRef<HTMLCanvasElement | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [bpm, setBpm] = useState<number | null>(null);
@@ -66,12 +68,12 @@ export default function FaceAnalyzer() {
         FaceLandmarker = visionMod.FaceLandmarker;
         const vision = await FilesetResolver.forVisionTasks(WASM_BASE);
         landmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL },
-          numFaces: 1,
-          runningMode: "VIDEO",
-          outputFaceBlendshapes: false,
-          outputFacialTransformationMatrixes: false,
-        });
+      baseOptions: { modelAssetPath: MODEL_URL },
+      numFaces: 1,
+      runningMode: "VIDEO",
+      outputFaceBlendshapes: false,
+      outputFacialTransformationMatrixes: true,
+    });
 
         setStreaming(true);
         setInitializing(false);
@@ -134,13 +136,73 @@ export default function FaceAnalyzer() {
       const box = getBounds(points, canvas.width, canvas.height);
       ctx.strokeRect(box.x, box.y, box.w, box.h);
 
-      // Draw a few landmark points
+      // Draw all landmark points
       ctx.fillStyle = "hsl(var(--primary))" as any;
-      for (let i = 0; i < points.length; i += 24) {
+      for (let i = 0; i < points.length; i++) {
         const p = points[i];
         ctx.beginPath();
-        ctx.arc(p.x * canvas.width, p.y * canvas.height, 1.8, 0, Math.PI * 2);
+        ctx.arc(p.x * canvas.width, p.y * canvas.height, 1.3, 0, Math.PI * 2);
         ctx.fill();
+      }
+
+      // Compute contours and metrics
+      const m = getFaceMetrics(points as any);
+
+      // Draw jawline path
+      if (m.jawline.path.length) {
+        ctx.strokeStyle = "hsl(var(--muted-foreground))";
+        ctx.beginPath();
+        m.jawline.path.forEach((p, idx) => {
+          const px = p.x * canvas.width;
+          const py = p.y * canvas.height;
+          if (idx === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+      }
+
+      // Highlight eye points
+      ctx.fillStyle = "hsl(var(--accent))" as any;
+      for (const ep of [...m.eyes.left.points, ...m.eyes.right.points]) {
+        ctx.beginPath();
+        ctx.arc(ep.x * canvas.width, ep.y * canvas.height, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Frontalized view (top-right canvas)
+      const front = frontRef.current;
+      if (front) {
+        const fctx = front.getContext("2d");
+        if (fctx) {
+          const targetW = 160, targetH = 160;
+          if (front.width !== targetW || front.height !== targetH) {
+            front.width = targetW; front.height = targetH;
+          }
+          fctx.clearRect(0, 0, front.width, front.height);
+
+          const lx = m.eyes.left.center.x * canvas.width;
+          const ly = m.eyes.left.center.y * canvas.height;
+          const rx = m.eyes.right.center.x * canvas.width;
+          const ry = m.eyes.right.center.y * canvas.height;
+          const cx = (lx + rx) / 2;
+          const cy = (ly + ry) / 2;
+          const eyeDist = Math.hypot(rx - lx, ry - ly) || 1;
+          const desiredEyeDist = targetW * 0.45;
+          const scale = desiredEyeDist / eyeDist;
+          const roll = m.head.roll;
+
+          fctx.save();
+          fctx.translate(targetW / 2, targetH / 2);
+          fctx.rotate(-roll);
+          fctx.scale(scale, scale);
+          // draw video centered on eye center
+          fctx.drawImage(video, -cx, -cy, canvas.width, canvas.height);
+          fctx.restore();
+
+          // Border
+          fctx.strokeStyle = "hsl(var(--ring))";
+          fctx.strokeRect(0, 0, front.width, front.height);
+        }
       }
 
       // Heart-rate ROI: forehead band (top 15% of face box)
@@ -224,6 +286,11 @@ export default function FaceAnalyzer() {
         <div className="relative w-full aspect-video rounded-lg overflow-hidden ring-1 ring-border">
           <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" playsInline muted />
           <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
+          <canvas
+            ref={frontRef}
+            className="absolute top-3 right-3 w-40 h-40 rounded-md bg-background/70 backdrop-blur-sm ring-1 ring-border shadow-sm"
+            aria-label="Frontalized face preview"
+          />
           {!streaming && (
             <div className="absolute inset-0 grid place-items-center bg-background/80">
               <p className="text-sm text-muted-foreground">{initializing ? "Initializing camera & model…" : "Camera unavailable"}</p>
