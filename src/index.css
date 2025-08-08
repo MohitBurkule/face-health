@@ -17,8 +17,9 @@ All colors MUST be HSL.
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    /* Brand refresh for a premium, colorful look */
+    --primary: 256 80% 60%;
+    --primary-foreground: 0 0% 100%;
 
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222.2 47.4% 11.2%;
@@ -26,8 +27,8 @@ All colors MUST be HSL.
     --muted: 210 40% 96.1%;
     --muted-foreground: 215.4 16.3% 46.9%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 210 90% 56%;
+    --accent-foreground: 210 40% 98%;
 
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
@@ -39,21 +40,25 @@ All colors MUST be HSL.
     --radius: 0.5rem;
 
     --sidebar-background: 0 0% 98%;
-
     --sidebar-foreground: 240 5.3% 26.1%;
-
     --sidebar-primary: 240 5.9% 10%;
-
     --sidebar-primary-foreground: 0 0% 98%;
-
     --sidebar-accent: 240 4.8% 95.9%;
-
     --sidebar-accent-foreground: 240 5.9% 10%;
-
     --sidebar-border: 220 13% 91%;
-
     --sidebar-ring: 217.2 91.2% 59.8%;
+
+    /* Design enhancements */
+    --glow: 256 100% 80%;
+    --gradient-start: var(--primary);
+    --gradient-end: var(--accent);
+    --shadow-elegant: 0 24px 60px -16px hsl(var(--primary) / 0.25);
+
+    /* Signature interaction defaults */
+    --mx: 50%;
+    --my: 20%;
   }
+
 
   .dark {
     --background: 222.2 84% 4.9%;
@@ -101,5 +106,19 @@ All colors MUST be HSL.
 
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+@layer components {
+  .app-hero-bg {
+    background:
+      radial-gradient(800px circle at var(--mx) var(--my), hsl(var(--gradient-start) / 0.25), transparent 60%),
+      linear-gradient(180deg, hsl(var(--background)), hsl(var(--secondary) / 0.35));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .app-hero-bg {
+      background: linear-gradient(180deg, hsl(var(--background)), hsl(var(--secondary) / 0.35));
+    }
   }
 }
