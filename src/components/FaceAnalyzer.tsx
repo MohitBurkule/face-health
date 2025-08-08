@@ -11,8 +11,9 @@ import { computeHeartRate } from "@/lib/ppg";
 let FaceLandmarker: any;
 let FilesetResolver: any;
 
-const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
-const MODEL_URL = `${WASM_BASE}/face_landmarker.task`;
+const TASKS_VERSION = "0.10.8";
+const WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VERSION}/wasm`;
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
 interface Sample { t: number; g: number }
 
