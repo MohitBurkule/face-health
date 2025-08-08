@@ -6,9 +6,10 @@ import { Separator } from "@/components/ui/separator";
 import { estimateFacialAdiposity } from "@/lib/facialFat";
 import { computeHeartRate } from "@/lib/ppg";
 import { getFaceMetrics } from "@/lib/faceMetrics";
-import { smoothChaikin } from "@/lib/smoothing";
+import { smoothChaikin, savitzkyGolay } from "@/lib/smoothing";
 import { estimateRespirationRate, estimateHRV } from "@/lib/ppgExtras";
 import { createInsightsTracker } from "@/lib/faceInsights";
+import { estimateSimilarity2D } from "@/lib/affine";
 
 // MediaPipe Tasks Vision types come from the package at runtime; we keep TS light here
 // to avoid depending on their types directly.
@@ -165,7 +166,8 @@ export default function FaceAnalyzer() {
 
       // Draw jawline path
       if (m.jawline.path.length) {
-        const smoothed = smoothChaikin(m.jawline.path as any, 2);
+        const chaikin = smoothChaikin(m.jawline.path as any, 2);
+        const smoothed = savitzkyGolay(chaikin as any, 7);
         ctx.strokeStyle = "hsl(var(--muted-foreground))";
         ctx.beginPath();
         smoothed.forEach((p, idx) => {
@@ -196,40 +198,27 @@ export default function FaceAnalyzer() {
           }
           fctx.clearRect(0, 0, front.width, front.height);
 
+          // Source control points (pixels)
           const lx = m.eyes.left.center.x * canvas.width;
           const ly = m.eyes.left.center.y * canvas.height;
           const rx = m.eyes.right.center.x * canvas.width;
           const ry = m.eyes.right.center.y * canvas.height;
-          const cx = (lx + rx) / 2;
-          const cy = (ly + ry) / 2;
-          const eyeDist = Math.hypot(rx - lx, ry - ly) || 1;
-          const desiredEyeDist = targetW * 0.45;
-          const scale = desiredEyeDist / eyeDist;
+          const mx = m.mouth.center.x * canvas.width;
+          const my = m.mouth.center.y * canvas.height;
 
-          // Use MediaPipe facial transformation matrix if available to refine yaw/roll
-          let yawShear = -m.head.yaw * 0.5; // fallback shear from heuristic yaw
-          let rollAdj = -m.head.roll;
-          const mats = (res as any)?.facialTransformationMatrixes;
-          try {
-            const arr = mats?.[0]?.data ?? mats?.[0];
-            if (arr && arr.length >= 16) {
-              const r00 = arr[0], r01 = arr[1], r02 = arr[2];
-              const r10 = arr[4], r11 = arr[5], r12 = arr[6];
-              const r20 = arr[8], r21 = arr[9], r22 = arr[10];
-              const yaw = Math.atan2(-r20, Math.hypot(r00, r10));
-              const roll = Math.atan2(r10, r00);
-              yawShear = Math.max(-0.6, Math.min(0.6, -Math.tan(yaw) * 0.5));
-              rollAdj = -roll;
-            }
-          } catch {}
+          // Canonical destination points
+          const dst = [
+            { x: targetW * 0.32, y: targetH * 0.40 }, // left eye
+            { x: targetW * 0.68, y: targetH * 0.40 }, // right eye
+            { x: targetW * 0.50, y: targetH * 0.75 }, // mouth
+          ];
+
+          const src = [ { x: lx, y: ly }, { x: rx, y: ry }, { x: mx, y: my } ];
+          const T = estimateSimilarity2D(src, dst);
 
           fctx.save();
-          fctx.translate(targetW / 2, targetH / 2);
-          fctx.rotate(rollAdj);
-          fctx.transform(1, 0, yawShear, 1, 0, 0);
-          fctx.scale(scale, scale);
-          // draw video centered on eye center
-          fctx.drawImage(video, -cx, -cy, canvas.width, canvas.height);
+          fctx.setTransform(T[0], T[2], T[1], T[3], T[4], T[5]);
+          fctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           fctx.restore();
 
           // Border

@@ -56,7 +56,7 @@ export function createInsightsTracker(opts?: { windowMs?: number }) {
     const earAvg = (earL + earR) / 2;
     const rate = state.blinkTimes.length * (60000 / state.windowMs);
     // yawn probability based on MAR
-    const yawnProb = clamp01((mar - 0.25) / 0.25); // 0 at 0.25, 1 at 0.5
+    const yawnProb = clamp01((mar - 0.35) / 0.35); // 0 at 0.35, 1 at 0.70
     return {
       earLeft: earL,
       earRight: earR,
@@ -81,7 +81,7 @@ export function createInsightsTracker(opts?: { windowMs?: number }) {
       if (state.baselineEar == null) state.baselineEar = earAvg;
       // slowly update baseline toward current
       state.baselineEar = 0.98 * state.baselineEar + 0.02 * earAvg;
-      const thresh = Math.max(0.08, Math.min(0.6, (state.baselineEar ?? 0.25) * 0.55));
+      const thresh = Math.max(0.12, Math.min(0.4, (state.baselineEar ?? earAvg) * 0.75));
 
       let blinkEvent = false;
       // state transitions
@@ -92,13 +92,13 @@ export function createInsightsTracker(opts?: { windowMs?: number }) {
         const start = state.lastStateChange;
         const duration = now - start;
         // consider blink if short closure (80-500 ms)
-        if (duration >= 80 && duration <= 500) {
+        if (duration >= 60 && duration <= 350) {
           state.blinkTimes.push(now);
         }
         state.closedSpans.push({ start, end: now });
         state.closed = false;
         state.lastStateChange = now;
-        blinkEvent = duration >= 80 && duration <= 500;
+        blinkEvent = duration >= 60 && duration <= 350;
       }
 
       cleanup(now);

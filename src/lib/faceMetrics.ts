@@ -13,7 +13,8 @@ export interface EyeMetrics {
 
 export interface MouthMetrics {
   points: Point3D[];
-  openRatio: number; // 0..1 relative to face height
+  center: Point2D;
+  openRatio: number; // MAR-based ratio (vertical/horizontal)
 }
 
 export interface HeadPose {
@@ -125,7 +126,7 @@ export function getFaceMetrics(landmarks: Point3D[]): FaceMetricsResult {
     return {
       box: emptyBox,
       eyes: { left: { points: [], center: { x:0, y:0 }, openness: 0 }, right: { points: [], center: { x:0, y:0 }, openness: 0 } },
-      mouth: { points: [], openRatio: 0 },
+      mouth: { points: [], center: { x:0, y:0 }, openRatio: 0 },
       head: { roll: 0, yaw: 0, pitch: 0 },
       jawline: { path: [] },
     };
@@ -133,17 +134,55 @@ export function getFaceMetrics(landmarks: Point3D[]): FaceMetricsResult {
 
   const box = boundingBox(landmarks);
 
-  // Derive ROIs
-  const leftEyePts = subset(landmarks, box, 0.12, 0.46, 0.25, 0.55);
-  const rightEyePts = subset(landmarks, box, 0.54, 0.88, 0.25, 0.55);
-  const mouthPts = subset(landmarks, box, 0.25, 0.75, 0.60, 1.00);
+  // Prefer MediaPipe index-based EAR/MAR when landmarks length is sufficient
+  const hasMesh = landmarks.length >= 400; // 468/478 mesh
+  function dist(i: number, j: number) {
+    const a = landmarks[i] || { x: 0, y: 0 } as Point3D;
+    const b = landmarks[j] || { x: 0, y: 0 } as Point3D;
+    const dx = (a.x - b.x);
+    const dy = (a.y - b.y);
+    return Math.hypot(dx, dy);
+  }
+
+  let leftEyePts: Point3D[] = [];
+  let rightEyePts: Point3D[] = [];
+  let mouthPts: Point3D[] = [];
+  let leftOpen = 0, rightOpen = 0, mar = 0;
+
+  if (hasMesh) {
+    // MediaPipe landmark indices (468 mesh)
+    const L_H = [33, 133];
+    const L_V1 = [159, 145];
+    const L_V2 = [158, 153];
+    const R_H = [263, 362];
+    const R_V1 = [386, 374];
+    const R_V2 = [385, 380];
+
+    const M_H = [61, 291];
+    const M_V1 = [13, 14];
+
+    leftEyePts = [...L_H, ...L_V1, ...L_V2].map(i => landmarks[i]).filter(Boolean) as Point3D[];
+    rightEyePts = [...R_H, ...R_V1, ...R_V2].map(i => landmarks[i]).filter(Boolean) as Point3D[];
+    mouthPts = [...M_H, ...M_V1].map(i => landmarks[i]).filter(Boolean) as Point3D[];
+
+    const lEar = (dist(L_V1[0], L_V1[1]) + dist(L_V2[0], L_V2[1])) / (2 * Math.max(1e-6, dist(L_H[0], L_H[1])));
+    const rEar = (dist(R_V1[0], R_V1[1]) + dist(R_V2[0], R_V2[1])) / (2 * Math.max(1e-6, dist(R_H[0], R_H[1])));
+    leftOpen = lEar; rightOpen = rEar;
+
+    mar = dist(M_V1[0], M_V1[1]) / Math.max(1e-6, dist(M_H[0], M_H[1]));
+  } else {
+    // Fallback ROI-based metrics
+    leftEyePts = subset(landmarks, box, 0.12, 0.46, 0.25, 0.55);
+    rightEyePts = subset(landmarks, box, 0.54, 0.88, 0.25, 0.55);
+    mouthPts = subset(landmarks, box, 0.25, 0.75, 0.60, 1.00);
+    leftOpen = opennessRatio(leftEyePts, box.height);
+    rightOpen = opennessRatio(rightEyePts, box.height);
+    mar = mouthOpenRatio(mouthPts, box.height);
+  }
 
   const leftCenter = mean(leftEyePts);
   const rightCenter = mean(rightEyePts);
-
-  const leftOpen = opennessRatio(leftEyePts, box.height);
-  const rightOpen = opennessRatio(rightEyePts, box.height);
-  const mar = mouthOpenRatio(mouthPts, box.height);
+  const mouthCenter = mean(mouthPts);
 
   const head = estimateHeadPose(box, leftCenter, rightCenter);
 
@@ -155,7 +194,7 @@ export function getFaceMetrics(landmarks: Point3D[]): FaceMetricsResult {
       left: { points: leftEyePts, center: leftCenter, openness: leftOpen },
       right: { points: rightEyePts, center: rightCenter, openness: rightOpen },
     },
-    mouth: { points: mouthPts, openRatio: mar },
+    mouth: { points: mouthPts, center: mouthCenter, openRatio: mar },
     head,
     jawline: { path: jaw },
   };
